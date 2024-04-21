@@ -1,8 +1,10 @@
 # Scan to Tagged OCRed PDFs
 
 This is a wrapper script around [`scanimage`][scanimage], [`noteshrunk`][noteshrunk], [`ocrmypdf`][ocrmypdf] and [`tmsu`][TMSU].
+
 It is designed for use with an Automatic Document Feeder (ADF).
 It scans a whole stack of pages with `scanimage`, optimizes, shrinks and converts them to PDF with `noteshrunk`, does a character recognition with `ocrmypdf` and tags the resulting file with `tsmu`.
+
 The intermediate images and pdfs are all stored in a temporary folder in the current working directory (so you can choose between disk and RAM [e.g. by running from `/tmp`]).
 
 
