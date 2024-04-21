@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
+
+import argcomplete
+
+import argparse
+
+import logging
+
+# sort files s1.pnm, ..., s9.pnm, s10.pnm, ...
+from natsort import natsorted
+
+# file path normalization and os.getcwd()
+import os
+
+from pathlib import Path
+
+# provides copy command in case of skip_ocr
+# needed to investigate PATH (check_command_exists)
+import shutil
+
+import subprocess
+
+# provides sys.exit in case of errors
+import sys
+
+# Create tmp folder to work in and create unique non-existing file names
+import tempfile
+
+
+#################### CONFIG ####################
+
+# See `scanimage --list-devices`
+SCANNER = 'fujitsu:fi-6110dj:1206658'
+
+# See `tesseract --list-langs`
+OCR_LANG = 'deu+eng'
+
+################################################
+
+def parse_args():
+    """
+    Parses command line arguments.
+
+    Returns:
+        argparse.Namespace: A namespace that holds the arguments as attributes.
+    """
+
+    parser = argparse.ArgumentParser(
+        description="Scan a document and save it as an optimized, OCRed and tagged PDF.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    parser.add_argument(
+        "output_file",
+        default='output.pdf',
+        nargs='?',
+        type=Path,
+        help="Output File Name for the Scanned Document")
+
+    parser.add_argument(
+        "-m",
+        "--mode",
+        help="Single sided / duplex scanning. The side facing away from the user is the <single> page / the first page of the <duplex> mode.",
+        choices=[
+            "single",
+            "duplex"],
+        default="duplex",
+        type=str.lower)
+    parser.add_argument(
+        "-c",
+        "--color",
+        help="Color Mode: Lineart / Gray / Color",
+        choices=[
+            "lineart",
+            "gray",
+            "color"],
+        default="color",
+        type=str.lower)
+    parser.add_argument(
+        "-r",
+        "--resolution",
+        help="Scanning Resolution",
+        choices=range(
+            50,
+            601),
+        metavar="{50..600}",
+        default=300,
+         type=int)
+    parser.add_argument(
+        '-t',
+        '--tags',
+        help="Comma-separated list of tags to be used with tmsu.\nE.g. \"tag1, tag2, tag3\"",
+        type=lambda t: [s.strip() for s in t.strip().split(',')],
+        default=None)
+    parser.add_argument(
+        "-s",
+        "--paper-size",
+        help="Paper Size for Scanning",
+        choices=["a4", "a5"],
+        default="a4",
+        type=str.lower)
+    parser.add_argument(
+        "--text",
+        action='store_true',
+        default=False,
+        help='A preset for text that results in black-and-white scans. Corresponds to \'-c lineart -d 400 --nsparams ""\'')
+    parser.add_argument(
+        '-k',
+        '--keep_intermediate',
+        action='store_true',
+        default=False,
+        help='Do not delete intermediate scans afterwards.')
+    parser.add_argument(
+        '--nsparams',
+        help="Arguments to be used for noteshrunk (see noteshrunk -h).",
+        type=lambda t: [s.strip() for s in t.strip().split(' ')],
+        default='-w -s --unsharp_mask')
+    parser.add_argument(
+        "--skip-ocr",
+        help="Skip OCR on the scanned document.",
+        action="store_true",
+        default=False)
+    parser.add_argument(
+        '-v',
+        '--verbose',
+        action='count',
+        help="Increase verbosity. Use twice to activate flushing of subprocess stdout to terminal.",
+        default=0)
+    parser.add_argument(
+        '-y',
+        '--overwrite',
+        action='store_true',
+        default=False,
+        help='Answer all questions with Yes. Overwrite existing files / Create TMSU database without asking.')
+
+    argcomplete.autocomplete(parser)
+
+    return parser.parse_args()
+
+
+def check_if_tmsu_db_exists(args):
+    """
+    Checks if a TMSU database exists in the current directory.
+
+    Returns:
+        bool: True if a TMSU database exists, False otherwise.
+    """
+
+    # Try to list the tags. If this succeeds the db exists, otherwise not.
+    # This is tied to the parsing speed of the db but _should_ be fast.
+    # Collect the output to not flush them to stdout
+    return_code = run_command(args, ['tmsu', 'tags'], capture_output=True, returncode_accept=1)
+
+    return True if return_code == 0 else False
+
+
+def run_command(args, command, capture_output=False, returncode_accept=None):
+    """
+    Runs a command as a subprocess and handles potential errors.
+
+    Args:
+        command (list): The command to be executed as a list of strings.
+        capture_output (bool, optional): Whether to capture the command's output.
+        returncode_accept (int, optional): An expected return code that indicates success.
+
+    Returns:
+        return code (int): The return / exit code of the command. 0 if the command executed successfully,
+                           <returncode_accept> if it failed with the accepted return code.
+    """
+    assert isinstance(command, list)
+
+    try:
+        command = [ c.strip() for c in command if c.strip() != '' ]
+        logging.debug('Running command \'{}\''.format(' '.join(command)))
+        subprocess.run(command, capture_output=True if args.verbose == 2 else capture_output, check=True)
+        return 0
+
+    except subprocess.CalledProcessError as e:
+
+        if e.returncode != returncode_accept:
+
+            logging.critical(e.stderr.decode('utf-8') if e.stderr is not None else None)
+            logging.critical("Stdout was: " + str(e.stdout.decode('utf-8') if e.stdout is not None else None))
+            sys.exit(1)
+        else:
+            return e.returncode
+
+    except FileNotFoundError:
+        logging.critical("Error: {} is not installed or not found in PATH.".format(command[0]))
+        sys.exit(1)
+
+    except Exception as e:
+        logging.critical(f"An unexpected error occurred: {e}")
+        sys.exit(1)
+
+
+def scan_document(args, paper_size, resolution, mode, color, folder='./'):
+    """
+    Scans a document using scanimage and saves it as PNM images in the specified folder.
+
+    Args:
+        paper_size (str): The paper size, such as "a4" or "a5".
+        resolution (int): The scanning resolution in DPI.
+        mode (str): The scanning mode, either "single" or "duplex".
+        color (str): The color mode, either "lineart", "gray", or "color".
+        folder (str, optional): The folder to save the scanned images. Defaults to './'.
+    """
+
+    logging.info('Scanning to {} ...'.format(folder))
+
+    # Execute the scanning command
+    run_command(args, [
+        "scanimage",
+        "-d", SCANNER,
+        "--verbose" if args.verbose else '',
+        "--progress",
+        "--resolution", str(resolution),
+        "--source", "ADF Duplex" if mode == "duplex" else "ADF Front",
+        "--batch-count=999", "--batch=" + str(Path(folder).joinpath("s%d.pnm")), "--batch-start=1",
+        "--buffermode", "On",
+        "--page-width", "210" if paper_size == "a4" else (
+            "148" if paper_size == "a5" else (
+            "105" if paper_size == "a6" else "210")),
+        "--page-height", "297" if paper_size == "a4" else (
+            "210" if paper_size == "a5" else (
+            "148" if paper_size == "a6" else "297")),
+        "-y", "297" if paper_size == "a4" else (
+              "210" if paper_size == "a5" else (
+              "148" if paper_size == "a6" else "297")),
+        "--ald=yes",
+        "--mode", color.capitalize(),
+        "--format", "pnm",
+        "--emphasis", "50",  # Sharpen image (-128..127)
+        "--brightness", "20",  # (-127..127)
+    ],
+        capture_output=True,
+        returncode_accept=7,
+    )
+    logging.info("Done")
+
+
+def compress_document(args, folder='./'):
+    """
+    Compresses scanned PNM images in the specified folder into a PDF file using noteshrunk.
+    Expects implicite name convention s%d.pnm within folder "folder"
+
+    Args:
+        folder (str, optional): The folder containing the PNM images. Defaults to './'.
+
+    Returns:
+        pathlib.Path: The path to the compressed PDF file.
+    """
+
+    # Create unique temp file and fetch it's name
+    # This will be the temp pdf file name
+    file_pdf = tempfile.NamedTemporaryFile(dir=Path(folder)).name
+    file_pdf = Path(file_pdf).with_suffix('.pdf')
+
+    # Execute the compression command
+    logging.info('Compressing images ...')
+    run_command(args, ["noteshrunk"] + ['--dpi={}'.format(args.resolution)] + args.nsparams + [
+        "--verbose" if args.verbose >= 1 else '',
+        "-o", str(file_pdf),
+        *natsorted([str(x) for x in Path(folder).glob('s*.pnm') if x.is_file()], key=str),
+    ],
+        capture_output=True,
+    )
+    logging.info("Done")
+
+    return file_pdf
+
+
+def ocr_document(file, output_file, args):
+    """
+    Performs OCR on a PDF document using ocrmypdf and saves the result to a new file.
+
+    Args:
+        file (pathlib.Path): The path to the input PDF file.
+        output_file (pathlib.Path): The path to save the OCRed PDF file.
+    """
+    # Execute the compression command
+    logging.info('OCRing document {} ...'.format(file))
+    run_command(args, [
+        "ocrmypdf",
+        "-v" if args.verbose >= 1 else '',
+        "-l", OCR_LANG,
+        str(file),
+        '{}'.format(str(output_file))
+    ],
+        capture_output=True,
+    )
+    logging.info('Done')
+
+
+def check_command_exists(command_name: str):
+    """
+    Checks if a given command exists in the system's PATH.
+
+    Args:
+        command_name (str): The name of the command to check.
+
+    Returns:
+        bool: True if the command is found in the PATH, False otherwise.
+    """
+    if not (shutil.which(command_name) is not None):
+        raise RuntimeError('"{}" not found in PATH! Is it installed?'.format(command_name))
+
+
+def main():
+    args = parse_args()
+
+    if args.verbose == 1:
+        logging.basicConfig(encoding='utf-8', format="%(levelname)s:%(message)s", level=logging.INFO)
+    if args.verbose == 2:
+        logging.basicConfig(encoding='utf-8', format="%(lineno)d-%(levelname)s:%(message)s", level=logging.DEBUG)
+    else:
+        logging.basicConfig(encoding='utf-8', format="%(lineno)d-%(levelname)s:%(message)s", level=logging.WARNING)
+
+    # Check if external programs are accessible
+    for command in ['tmsu', 'scanimage']:
+        check_command_exists(command)
+    if not args.skip_ocr:
+        check_command_exists('ocrmypdf')
+
+    if args.text:
+        args.color = 'lineart'
+#         args.nsparams = ['-w', '-s', '--unsharp_mask', '-n', '2']
+        args.resolution = 400
+        args.nsparams = []
+
+    # Create tmp. folder within current folder
+    # Reason: scanimage creates separate images files for each page. By
+    # putting them into a separate folder, they can be deleted with the
+    # termination of this folder.
+    with tempfile.TemporaryDirectory(dir=os.getcwd(), prefix='tmp_scans-', delete=(not args.keep_intermediate)) as tmp_dir:
+
+        # Temp. folder to save scans to
+        tmp_dir = Path(tmp_dir)
+        logging.debug('Temp. folder {} created.'.format(tmp_dir))
+
+        # Ensure output file is a pdf and sanitize path
+        args.output_file = Path(os.path.normpath(args.output_file)).with_suffix('.pdf')
+        logging.info('Setting {} as output file.'.format(args.output_file))
+
+        # If output file exists, ask if overwrite.
+        if args.output_file.exists():
+
+            if args.overwrite:
+                logging.info('Overwriting existing file {} ...'.format(args.output_file))
+
+            else:
+                while True:
+                    response = input(
+                        "File {} exists! Overwrite? [y/N] ".format(args.output_file)).strip().lower()
+                    if response == '' or response == 'n':
+                        logging.info("Exiting ...")
+                        sys.exit(0)
+                    elif response == 'y':
+                        break
+
+        # Save current location for later switching back
+        folder_wd = os.getcwd()
+
+        # .absolute() method ensures that also locally referenced files are moved out of the temp. folder.
+        # E.g. "test.pdf" --> "/my/path/to/test.pdf"
+        args.output_file = args.output_file.absolute()
+
+        # You could also set the output destination of scanimage to the tmp_folder and work "from outside",
+        # but it was easier to move and work from inside and just move the resulting pdf out in the end.
+
+        # Move into temp. folder
+        os.chdir(tmp_dir)
+
+        scan_document(
+            args=args,
+            paper_size=args.paper_size,
+            resolution=args.resolution,
+            mode=args.mode,
+            color=args.color,
+            folder=os.getcwd(),
+        )
+
+        # shrink pdf
+        file_compressed = compress_document(args)
+
+        if not args.skip_ocr:
+            # OCR and save it to original folder ..
+            ocr_document(
+                file=file_compressed,
+                output_file=args.output_file,
+                args=args,
+            )
+        else:
+            # .. otherwise copy it to original folder
+            shutil.copy(file_compressed, args.output_file)
+
+        logging.info("Scanned to: {}".format(args.output_file))
+
+        if args.keep_intermediate:
+            logging.info('Skipping the deletion of intermediate scans (folder {}).'.format(tmp_dir))
+
+        # Move back to original folder (outside of temp. dir)
+        os.chdir(folder_wd)
+
+    # Tag resulting pdf if tags are given
+    if args.tags is not None:
+
+        # check if TMSU db exists
+        if not check_if_tmsu_db_exists(args):
+
+            if not args.overwrite:
+                # If no TMSU db exists, ask if one should be created
+                while True:
+                    response = input(
+                        "No TMSU db in the output folder! Create? [y/N] ").strip().lower()
+                    if response == '' or response == 'n':
+                        # If not, we're done.
+                        logging.info("Exiting ...")
+                        sys.exit(0)
+                    elif response == 'y':
+                        run_command(args, ['tmsu', 'init'], capture_output=True)
+                        break
+            else:
+                run_command(args, ['tmsu', 'init'], capture_output=True)
+
+        run_command(args, ['tmsu', 'tag', str(args.output_file)] + args.tags)
+        logging.info('{} tagged with: '.format(args.output_file) + ', '.join(args.tags))
+
+
+if __name__ == "__main__":
+    main()
