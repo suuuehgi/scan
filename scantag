@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # PYTHON_ARGCOMPLETE_OK
+VERSION = 1.1
 
 import argcomplete
 
@@ -77,6 +78,14 @@ def parse_args():
         default="color",
         type=str.lower)
     parser.add_argument(
+        "-p",
+        "--preset",
+        help='Presets: "text": A preset for text that results in black-and-white scans - corresponds to \'-c lineart -d 400 --nsparams=""\'',
+        choices=[
+            "text"],
+        default='',
+        type=str.lower)
+    parser.add_argument(
         "-r",
         "--resolution",
         help="Scanning Resolution",
@@ -103,7 +112,12 @@ def parse_args():
         "--text",
         action='store_true',
         default=False,
-        help='A preset for text that results in black-and-white scans. Corresponds to \'-c lineart -d 400 --nsparams ""\'')
+        help='Short for --preset="text" - A preset for text that results in black-and-white scans - corresponds to \'-c lineart -d 400 --nsparams ""\'')
+    parser.add_argument(
+        '--scan',
+        action='store_true',
+        default=False,
+        help='Just scan, skip the rest.')
     parser.add_argument(
         '-k',
         '--keep_intermediate',
@@ -132,6 +146,11 @@ def parse_args():
         action='store_true',
         default=False,
         help='Answer all questions with Yes. Overwrite existing files / Create TMSU database without asking.')
+    parser.add_argument(
+        '--version',
+        action='version',
+        version=VERSION,
+        help='Show program version and exit')
 
     argcomplete.autocomplete(parser)
 
@@ -322,11 +341,14 @@ def main():
     if not args.skip_ocr:
         check_command_exists('ocrmypdf')
 
-    if args.text:
+    if args.text or args.preset == 'text':
         args.color = 'lineart'
 #         args.nsparams = ['-w', '-s', '--unsharp_mask', '-n', '2']
         args.resolution = 400
         args.nsparams = []
+
+    if args.scan:
+        args.keep_intermediate = True
 
     # Create tmp. folder within current folder
     # Reason: scanimage creates separate images files for each page. By
@@ -338,32 +360,33 @@ def main():
         tmp_dir = Path(tmp_dir)
         logging.debug('Temp. folder {} created.'.format(tmp_dir))
 
-        # Ensure output file is a pdf and sanitize path
-        args.output_file = Path(os.path.normpath(args.output_file)).with_suffix('.pdf')
-        logging.info('Setting {} as output file.'.format(args.output_file))
+        if not args.scan:
+            # Ensure output file is a pdf and sanitize path
+            args.output_file = Path(os.path.normpath(args.output_file)).with_suffix('.pdf')
+            logging.info('Setting {} as output file.'.format(args.output_file))
 
-        # If output file exists, ask if overwrite.
-        if args.output_file.exists():
+            # If output file exists, ask if overwrite.
+            if args.output_file.exists():
 
-            if args.overwrite:
-                logging.info('Overwriting existing file {} ...'.format(args.output_file))
+                if args.overwrite:
+                    logging.info('Overwriting existing file {} ...'.format(args.output_file))
 
-            else:
-                while True:
-                    response = input(
-                        "File {} exists! Overwrite? [y/N] ".format(args.output_file)).strip().lower()
-                    if response == '' or response == 'n':
-                        logging.info("Exiting ...")
-                        sys.exit(0)
-                    elif response == 'y':
-                        break
+                else:
+                    while True:
+                        response = input(
+                            "File {} exists! Overwrite? [y/N] ".format(args.output_file)).strip().lower()
+                        if response == '' or response == 'n':
+                            logging.info("Exiting ...")
+                            sys.exit(0)
+                        elif response == 'y':
+                            break
+
+            # .absolute() method ensures that also locally referenced files are moved out of the temp. folder.
+            # E.g. "test.pdf" --> "/my/path/to/test.pdf"
+            args.output_file = args.output_file.absolute()
 
         # Save current location for later switching back
         folder_wd = os.getcwd()
-
-        # .absolute() method ensures that also locally referenced files are moved out of the temp. folder.
-        # E.g. "test.pdf" --> "/my/path/to/test.pdf"
-        args.output_file = args.output_file.absolute()
 
         # You could also set the output destination of scanimage to the tmp_folder and work "from outside",
         # but it was easier to move and work from inside and just move the resulting pdf out in the end.
@@ -380,30 +403,32 @@ def main():
             folder=os.getcwd(),
         )
 
-        # shrink pdf
-        file_compressed = compress_document(args)
+        if not args.scan:
+            # shrink pdf
+            file_compressed = compress_document(args)
 
-        if not args.skip_ocr:
-            # OCR and save it to original folder ..
-            ocr_document(
-                file=file_compressed,
-                output_file=args.output_file,
-                args=args,
-            )
-        else:
-            # .. otherwise copy it to original folder
-            shutil.copy(file_compressed, args.output_file)
+            if not args.skip_ocr:
+                # OCR and save it to original folder ..
+                ocr_document(
+                    file=file_compressed,
+                    output_file=args.output_file,
+                    args=args,
+                )
+            else:
+                # .. otherwise copy it to original folder
+                shutil.copy(file_compressed, args.output_file)
 
-        logging.info("Scanned to: {}".format(args.output_file))
+            logging.info("Scanned to: {}".format(args.output_file))
 
         if args.keep_intermediate:
-            logging.info('Skipping the deletion of intermediate scans (folder {}).'.format(tmp_dir))
+            logging.info(('Skipping the deletion of intermediate scans (folder {}).' if not args.scan
+                          else 'Documents scanned to folder {}.').format(tmp_dir))
 
         # Move back to original folder (outside of temp. dir)
         os.chdir(folder_wd)
 
     # Tag resulting pdf if tags are given
-    if args.tags is not None:
+    if args.tags is not None and not args.scan:
 
         # check if TMSU db exists
         if not check_if_tmsu_db_exists(args):
