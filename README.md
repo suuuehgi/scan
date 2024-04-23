@@ -65,13 +65,13 @@ options:
   -c {lineart,gray,color}, --color {lineart,gray,color}
                         Color Mode: Lineart / Gray / Color (default: color)
   -p {text}, --preset {text}
-                        Presets: "text": A preset for text that results in black-and-white scans - corresponds to '-c lineart -d 400 --nsparams=""' (default: )
+                        Presets: "text": A preset for text that results in black-and-white scans - corresponds to '-c lineart -r 400 --nsparams=""' (default: )
   -r {50..600}, --resolution {50..600}
                         Scanning Resolution (default: 300)
   -t TAGS, --tags TAGS  Comma-separated list of tags to be used with tmsu. E.g. "tag1, tag2, tag3" (default: None)
   -s {a4,a5}, --paper-size {a4,a5}
                         Paper Size for Scanning (default: a4)
-  --text                Short for --preset="text" - A preset for text that results in black-and-white scans - corresponds to '-c lineart -d 400 --nsparams ""' (default:
+  --text                Short for --preset="text" - A preset for text that results in black-and-white scans - corresponds to '-c lineart -r 400 --nsparams ""' (default:
                         False)
   --scan                Just scan, skip the rest. (default: False)
   -k, --keep_intermediate
