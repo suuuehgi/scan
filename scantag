@@ -80,7 +80,7 @@ def parse_args():
     parser.add_argument(
         "-p",
         "--preset",
-        help='Presets: "text": A preset for text that results in black-and-white scans - corresponds to \'-c lineart -d 400 --nsparams=""\'',
+        help='Presets: "text": A preset for text that results in black-and-white scans - corresponds to \'-c gray -d 400 --nsparams="-e -b --denoise_opening -os 1"\'',
         choices=[
             "text"],
         default='',
@@ -112,7 +112,7 @@ def parse_args():
         "--text",
         action='store_true',
         default=False,
-        help='Short for --preset="text" - A preset for text that results in black-and-white scans - corresponds to \'-c lineart -d 400 --nsparams ""\'')
+        help='Short for --preset="text" - A preset for text that results in black-and-white scans - corresponds to \'-c gray -d 400 --nsparams "-e -b --denoise_opening -os 1"\'')
     parser.add_argument(
         '--scan',
         action='store_true',
@@ -191,7 +191,7 @@ def run_command(args, command, capture_output=False, returncode_accept=None):
     try:
         command = [ c.strip() for c in command if c.strip() != '' ]
         logging.debug('Running command \'{}\''.format(' '.join(command)))
-        subprocess.run(command, capture_output=True if args.verbose == 2 else capture_output, check=True)
+        subprocess.run(command, capture_output=False if args.verbose == 2 else capture_output, check=True)
         return 0
 
     except subprocess.CalledProcessError as e:
@@ -277,8 +277,8 @@ def compress_document(args, folder='./'):
 
     # Execute the compression command
     logging.info('Compressing images ...')
-    run_command(args, ["noteshrunk"] + ['--dpi={}'.format(args.resolution)] + args.nsparams + [
-        "--verbose" if args.verbose >= 1 else '',
+    run_command(args, ["noteshrunk-dev"] + ['--dpi={}'.format(args.resolution)] + args.nsparams
+        + args.verbose * ["--verbose"] + [
         "-o", str(file_pdf),
         *natsorted([str(x) for x in Path(folder).glob('s*.pnm') if x.is_file()], key=str),
     ],
@@ -342,10 +342,10 @@ def main():
         check_command_exists('ocrmypdf')
 
     if args.text or args.preset == 'text':
-        args.color = 'lineart'
+        args.color = 'gray'
 #         args.nsparams = ['-w', '-s', '--unsharp_mask', '-n', '2']
         args.resolution = 400
-        args.nsparams = []
+        args.nsparams = ['-e', '-b', '--denoise_opening', '-os', '1']
 
     if args.scan:
         args.keep_intermediate = True
